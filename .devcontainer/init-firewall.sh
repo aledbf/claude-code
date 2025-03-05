@@ -3,7 +3,7 @@ set -uo pipefail
 IFS=$'\n\t'
 
 # Global variables
-DEBUG=${DEBUG:-true}
+DEBUG=${DEBUG:-false}
 ADDED_IPS_FILE="/tmp/claude-fw-added-ips.txt"
 IPV6_ENABLED=false
 IPSET_AVAILABLE=true
@@ -31,10 +31,10 @@ add_ip() {
     local ip="$1"
     [ -f "$ADDED_IPS_FILE" ] && grep -q "^$ip$" "$ADDED_IPS_FILE" && return 0
 
-    if [ "$IPSET_AVAILABLE" = true ] && ipset add claude-allowed-domains "$ip" 2>/dev/null; then
+    if [ "$IPSET_AVAILABLE" = true ] && ipset add claude-allowed-domains "$ip"; then
         echo "$ip" >> "$ADDED_IPS_FILE"
         return 0
-    elif iptables -A CLAUDE_OUTPUT -d "$ip" -j ACCEPT 2>/dev/null; then
+    elif iptables -A CLAUDE_OUTPUT -d "$ip" -j ACCEPT; then
         echo "$ip" >> "$ADDED_IPS_FILE"
         return 0
     else
@@ -49,7 +49,7 @@ add_ipv6() {
     local ip="$1"
     [ -f "$ADDED_IPS_FILE" ] && grep -q "^$ip$" "$ADDED_IPS_FILE" && return 0
 
-    if ip6tables -A CLAUDE_OUTPUT -d "$ip" -j ACCEPT 2>/dev/null; then
+    if ip6tables -A CLAUDE_OUTPUT -d "$ip" -j ACCEPT; then
         echo "$ip" >> "$ADDED_IPS_FILE"
         return 0
     else
@@ -63,7 +63,7 @@ add_domain() {
     local domain="$1"
     log "Resolving $domain..."
 
-    local ips=$(dig +short A "$domain" 2>/dev/null || echo "")
+    local ips=$(dig +short A "$domain" || echo "")
     [ -z "$ips" ] && warning "Failed to resolve $domain" && return 1
 
     local count=0
@@ -80,7 +80,7 @@ add_interface() {
     local iface="$1"
     log "Adding networks for interface $iface..."
 
-    local addresses=$(ip -o addr show dev "$iface" 2>/dev/null | grep -w inet | awk '{print $4}')
+    local addresses=$(ip -o addr show dev "$iface" | grep -w inet | awk '{print $4}')
     [ -z "$addresses" ] && debug_log "No addresses for $iface" && return 1
 
     local count=0
@@ -98,16 +98,16 @@ add_interface() {
 # Clean up rules
 cleanup() {
     log "Cleaning up..."
-    iptables -D INPUT -j CLAUDE_INPUT 2>/dev/null || true
-    iptables -D OUTPUT -j CLAUDE_OUTPUT 2>/dev/null || true
-    iptables -D FORWARD -j CLAUDE_FORWARD 2>/dev/null || true
-    iptables -F CLAUDE_INPUT 2>/dev/null || true
-    iptables -F CLAUDE_OUTPUT 2>/dev/null || true
-    iptables -F CLAUDE_FORWARD 2>/dev/null || true
-    iptables -X CLAUDE_INPUT 2>/dev/null || true
-    iptables -X CLAUDE_OUTPUT 2>/dev/null || true
-    iptables -X CLAUDE_FORWARD 2>/dev/null || true
-    ipset destroy claude-allowed-domains 2>/dev/null || true
+    iptables -D INPUT -j CLAUDE_INPUT || true
+    iptables -D OUTPUT -j CLAUDE_OUTPUT || true
+    iptables -D FORWARD -j CLAUDE_FORWARD || true
+    iptables -F CLAUDE_INPUT || true
+    iptables -F CLAUDE_OUTPUT || true
+    iptables -F CLAUDE_FORWARD || true
+    iptables -X CLAUDE_INPUT || true
+    iptables -X CLAUDE_OUTPUT || true
+    iptables -X CLAUDE_FORWARD || true
+    ipset destroy claude-allowed-domains || true
     rm -f "$ADDED_IPS_FILE"
     log "Cleanup complete"
 }
@@ -162,9 +162,9 @@ done
 
 # Add chain references
 log "Adding chain references..."
-iptables -D INPUT -j CLAUDE_INPUT 2>/dev/null || true
-iptables -D OUTPUT -j CLAUDE_OUTPUT 2>/dev/null || true
-iptables -D FORWARD -j CLAUDE_FORWARD 2>/dev/null || true
+iptables -D INPUT -j CLAUDE_INPUT || true
+iptables -D OUTPUT -j CLAUDE_OUTPUT || true
+iptables -D FORWARD -j CLAUDE_FORWARD || true
 
 try_cmd "iptables -I INPUT 1 -j CLAUDE_INPUT" "iptables -A INPUT -j CLAUDE_INPUT" "Jump to CLAUDE_INPUT"
 try_cmd "iptables -I OUTPUT 1 -j CLAUDE_OUTPUT" "iptables -A OUTPUT -j CLAUDE_OUTPUT" "Jump to CLAUDE_OUTPUT"
@@ -173,7 +173,7 @@ try_cmd "iptables -I FORWARD 1 -j CLAUDE_FORWARD" "iptables -A FORWARD -j CLAUDE
 # Create ipset
 if [ "$IPSET_AVAILABLE" = true ]; then
     log "Creating ipset..."
-    ipset destroy claude-allowed-domains 2>/dev/null || true
+    ipset destroy claude-allowed-domains || true
     if ! ipset create claude-allowed-domains hash:net; then
         warning "Failed to create ipset, using direct rules"
         IPSET_AVAILABLE=false
@@ -200,7 +200,7 @@ gh_ranges=$(curl -s --connect-timeout 5 https://api.github.com/meta)
 if [ -n "$gh_ranges" ] && echo "$gh_ranges" | grep -q "api"; then
     while read -r cidr; do
         [[ -n "$cidr" ]] && add_ip "$cidr"
-    done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' 2>/dev/null || echo "")
+    done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' || echo "")
 else
     # Fallback GitHub IPs
     for ip in "140.82.112.0/20" "192.30.252.0/22" "185.199.108.0/22" "143.55.64.0/20"; do
@@ -230,12 +230,12 @@ aws_json=$(curl -s --connect-timeout 5 "https://ip-ranges.amazonaws.com/ip-range
 if [ -n "$aws_json" ]; then
     while read -r ip; do
         [[ -n "$ip" ]] && add_ip "$ip"
-    done < <(echo "$aws_json" | jq -r '.prefixes[] | select(.service=="S3") | .ip_prefix' 2>/dev/null || echo "")
+    done < <(echo "$aws_json" | jq -r '.prefixes[] | select(.service=="S3") | .ip_prefix' || echo "")
 
     if [ "$IPV6_ENABLED" = true ]; then
         while read -r ip; do
             [[ -n "$ip" ]] && add_ipv6 "$ip"
-        done < <(echo "$aws_json" | jq -r '.ipv6_prefixes[] | select(.service=="S3") | .ipv6_prefix' 2>/dev/null || echo "")
+        done < <(echo "$aws_json" | jq -r '.ipv6_prefixes[] | select(.service=="S3") | .ipv6_prefix' || echo "")
     fi
 fi
 
