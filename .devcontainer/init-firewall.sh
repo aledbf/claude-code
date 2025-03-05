@@ -3,7 +3,7 @@ set -uo pipefail
 IFS=$'\n\t'
 
 # Global variables
-DEBUG=${DEBUG:-false}
+DEBUG=${DEBUG:-true}
 ADDED_IPS_FILE="/tmp/claude-fw-added-ips.txt"
 IPV6_ENABLED=false
 IPSET_AVAILABLE=true
