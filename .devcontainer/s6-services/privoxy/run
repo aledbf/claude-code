@@ -1,3 +1,4 @@
 #!/command/execlineb -P
 # Runs privoxy in the foreground (required for longrun services) as root.
+ulimit -n 4096
 /usr/sbin/privoxy --no-daemon /etc/privoxy/config

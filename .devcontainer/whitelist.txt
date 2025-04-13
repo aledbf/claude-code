@@ -16,5 +16,5 @@
 .sentry.io
 .statsig.com
 # Add any other domains you need access to here
-# .your-company-domain.com
-# api.some-service.com
+.blob.core.windows.net
+.gitpod.io
