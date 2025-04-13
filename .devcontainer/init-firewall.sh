@@ -2,80 +2,78 @@
 set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
 IFS=$'\n\t'       # Stricter word splitting
 
-exit 0	
-
-echo "Configuring firewall rules with custom PROXY_REDIRECT chain..."
+echo "Configuring firewall rules with custom CLAUDE_CODE chains..."
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "This script must be run as root" >&2
   exit 1
 fi
 
-# Check if the PROXY_REDIRECT chain already exists
-if ! iptables -t nat -L PROXY_REDIRECT >/dev/null 2>&1; then
-  echo "Creating PROXY_REDIRECT chain"
-  iptables -t nat -N PROXY_REDIRECT
+# === Create CLAUDE_CODE chains (if they don't exist) ===
+# Create the custom chains in each table we'll use
+if ! iptables -L CLAUDE_CODE_FILTER >/dev/null 2>&1; then
+  echo "Creating CLAUDE_CODE_FILTER chain for filter table"
+  iptables -N CLAUDE_CODE_FILTER
 else
-  echo "PROXY_REDIRECT chain already exists"
-  # Clear the chain but keep it in place
-  iptables -t nat -F PROXY_REDIRECT
+  echo "CLAUDE_CODE_FILTER chain already exists"
+  iptables -F CLAUDE_CODE_FILTER
 fi
 
-# === Base Rules (filter table) - adding with proper checks ===
-# We use -C to check if the rule exists before adding it
+if ! iptables -t nat -L CLAUDE_CODE_NAT >/dev/null 2>&1; then
+  echo "Creating CLAUDE_CODE_NAT chain for nat table"
+  iptables -t nat -N CLAUDE_CODE_NAT
+else
+  echo "CLAUDE_CODE_NAT chain already exists"
+  iptables -t nat -F CLAUDE_CODE_NAT
+fi
 
+# === Set up chain references ===
+# Make sure all traffic goes through our chains first
+# For filter table (INPUT, OUTPUT)
+iptables -C INPUT -j CLAUDE_CODE_FILTER 2>/dev/null || iptables -I INPUT 1 -j CLAUDE_CODE_FILTER
+iptables -C OUTPUT -j CLAUDE_CODE_FILTER 2>/dev/null || iptables -I OUTPUT 1 -j CLAUDE_CODE_FILTER
+
+# For nat table (OUTPUT only)
+iptables -t nat -C OUTPUT -j CLAUDE_CODE_NAT 2>/dev/null || iptables -t nat -I OUTPUT 1 -j CLAUDE_CODE_NAT
+
+# === Base Rules (filter table - using CLAUDE_CODE_FILTER) ===
 # Allow loopback traffic
-iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -A INPUT -i lo -j ACCEPT
-iptables -C OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A CLAUDE_CODE_FILTER -i lo -j ACCEPT
+iptables -A CLAUDE_CODE_FILTER -o lo -j ACCEPT
 
 # Allow outbound DNS
-iptables -C OUTPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+iptables -A CLAUDE_CODE_FILTER -p udp --dport 53 -j ACCEPT
 
 # Allow inbound DNS responses
-iptables -C INPUT -p udp --sport 53 -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --sport 53 -j ACCEPT
+iptables -A CLAUDE_CODE_FILTER -p udp --sport 53 -j ACCEPT
 
 # Allow SSH
-iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+iptables -A CLAUDE_CODE_FILTER -p tcp --dport 22 -j ACCEPT
 
-# Allow established/related connections (important for return traffic)
-iptables -C INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -C OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+# Allow established/related connections
+iptables -A CLAUDE_CODE_FILTER -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-iptables -C OUTPUT -p tcp -m owner --uid-owner root -j ACCEPT  || iptables -A OUTPUT -p tcp -m owner --uid-owner root -j ACCEPT
-# Alternative approach using source port if Privoxy doesn't run under its own user
-iptables -C OUTPUT -p tcp --sport 31265 -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p tcp --sport 31265 -j ACCEPT
+# Allow root user traffic
+iptables -A CLAUDE_CODE_FILTER -p tcp -m owner --uid-owner root -j ACCEPT
 
-# === Direct access rule for metadata server (169.254.169.254) ===
-iptables -C OUTPUT -d 169.254.169.254/32 -j ACCEPT 2>/dev/null || iptables -A OUTPUT -d 169.254.169.254/32 -j ACCEPT
+# Allow Privoxy traffic using source port
+iptables -A CLAUDE_CODE_FILTER -p tcp --sport 31265 -j ACCEPT
 
-# === NAT Redirection using custom chain - with proper scoping ===
-# Rules within the PROXY_REDIRECT chain:
-# Redirect HTTP traffic to Privoxy
-iptables -t nat -A PROXY_REDIRECT -p tcp --dport 80 -j REDIRECT --to-port 31265
-# Redirect HTTPS traffic to Privoxy
-iptables -t nat -A PROXY_REDIRECT -p tcp --dport 443 -j REDIRECT --to-port 31265
+# Direct access rule for metadata server
+iptables -A CLAUDE_CODE_FILTER -d 169.254.169.254/32 -j ACCEPT
 
-# Rules in the OUTPUT chain (nat table) to jump to our custom chain:
-# First, check if these rules already exist before adding
+# === NAT Redirection rules (in CLAUDE_CODE_NAT) ===
+# Exclude traffic destined for Privoxy itself
+iptables -t nat -A CLAUDE_CODE_NAT -p tcp -d 127.0.0.1 --dport 31265 -j RETURN
 
-# IMPORTANT: Exclude traffic destined for Privoxy itself to prevent redirection loops!
-if ! iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport 31265 -j RETURN 2>/dev/null; then
-  iptables -t nat -A OUTPUT -p tcp -d 127.0.0.1 --dport 31265 -j RETURN
-fi
+# Exclude the metadata server from proxying
+iptables -t nat -A CLAUDE_CODE_NAT -p tcp -d 169.254.169.254/32 -j RETURN
 
-# Exclude the metadata server (169.254.169.254) from proxying
-if ! iptables -t nat -C OUTPUT -p tcp -d 169.254.169.254/32 -j RETURN 2>/dev/null; then
-  iptables -t nat -A OUTPUT -p tcp -d 169.254.169.254/32 -j RETURN
-fi
+# For HTTP traffic, redirect to Privoxy
+iptables -t nat -A CLAUDE_CODE_NAT -p tcp --dport 80 -j REDIRECT --to-port 31265
 
-# For all other TCP traffic on ports 80 and 443, jump to the PROXY_REDIRECT chain
-if ! iptables -t nat -C OUTPUT -p tcp -m tcp --dport 80 -j PROXY_REDIRECT 2>/dev/null; then
-  iptables -t nat -A OUTPUT -p tcp -m tcp --dport 80 -j PROXY_REDIRECT
-fi
-
-if ! iptables -t nat -C OUTPUT -p tcp -m tcp --dport 443 -j PROXY_REDIRECT 2>/dev/null; then
-  iptables -t nat -A OUTPUT -p tcp -m tcp --dport 443 -j PROXY_REDIRECT
-fi
+# For HTTPS traffic, redirect to Privoxy
+iptables -t nat -A CLAUDE_CODE_NAT -p tcp --dport 443 -j REDIRECT --to-port 31265
 
 # === Default Policies (filter table) - commented out for review ===
 # These are left commented out to avoid locking yourself out
@@ -84,7 +82,7 @@ fi
 # iptables -P FORWARD DROP
 # iptables -P OUTPUT DROP
 
-echo "Firewall rules successfully applied"
+echo "CLAUDE_CODE firewall rules successfully applied"
 
 # Optional: Display current rules for verification
 echo "Current NAT rules:"

@@ -8,7 +8,6 @@
 # Use patterns like .example.com to allow subdomains
 
 {-block{Allow example domains - customize this list}}
-.google.com
 .github.com
 .githubusercontent.com
 .npmjs.org
