@@ -1,0 +1,20 @@
+# Default Action: Block everything
+{+block{Block all connections by default}}
+/
+
+# Whitelist specific domains or patterns below
+# The format is {-block{Optional description}}
+# Followed by the domain/pattern on the next line(s)
+# Use patterns like .example.com to allow subdomains
+
+{-block{Allow example domains - customize this list}}
+.google.com
+.github.com
+.githubusercontent.com
+.npmjs.org
+.anthropic.com
+.sentry.io
+.statsig.com
+# Add any other domains you need access to here
+# .your-company-domain.com
+# api.some-service.com

@@ -1,0 +1,3 @@
+#!/command/execlineb -P
+# Runs the firewall script once as root.
+/usr/local/bin/init-firewall.sh

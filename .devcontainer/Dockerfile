@@ -7,11 +7,12 @@ ENV TZ="$TZ"
 RUN apt update && apt install -y less \
   git \
   procps \
-  sudo \
   fzf \
   zsh \
+  ca-certificates \
   man-db \
   unzip \
+  privoxy \
   gnupg2 \
   gh \
   iptables \
@@ -20,6 +21,13 @@ RUN apt update && apt install -y less \
   dnsutils \
   aggregate \
   jq
+
+# --- Install s6-overlay ---
+ARG S6_OVERLAY_VERSION=3.1.6.2
+RUN ARCH=$(dpkg --print-architecture) && \
+    wget -q "https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-${ARCH}.tar.xz" -O /tmp/s6-overlay.tar.xz && \
+    tar -C / -Jxpf /tmp/s6-overlay.tar.xz && \
+    rm /tmp/s6-overlay.tar.xz
 
 # Ensure default node user has access to /usr/local/share
 RUN mkdir -p /usr/local/share/npm-global && \
@@ -44,35 +52,42 @@ WORKDIR /workspace
 
 RUN ARCH=$(dpkg --print-architecture) && \
   wget "https://github.com/dandavison/delta/releases/download/0.18.2/git-delta_0.18.2_${ARCH}.deb" && \
-  sudo dpkg -i "git-delta_0.18.2_${ARCH}.deb" && \
+  dpkg -i "git-delta_0.18.2_${ARCH}.deb" && \
   rm "git-delta_0.18.2_${ARCH}.deb"
 
-# Set up non-root user
-USER node
-
-# Install global packages
+# Install global packages - as root, s6 will handle user switching
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH=$PATH:/usr/local/share/npm-global/bin
 
-# Set the default shell to bash rather than sh
+# Set the default shell to zsh
 ENV SHELL /bin/zsh
 
-# Default powerline10k theme
-RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v1.2.0/zsh-in-docker.sh)" -- \
+# Default powerline10k theme - using su to run as node user
+RUN su node -c "sh -c \"$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v1.2.0/zsh-in-docker.sh)\" -- \
   -p git \
   -p fzf \
-  -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
-  -a "source /usr/share/doc/fzf/examples/completion.zsh" \
-  -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
-  -x
+  -a \"source /usr/share/doc/fzf/examples/key-bindings.zsh\" \
+  -a \"source /usr/share/doc/fzf/examples/completion.zsh\" \
+  -a \"export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history\" \
+  -x"
 
-# Install Claude
-RUN npm install -g @anthropic-ai/claude-code
+# Install Claude - using su to run as node user
+RUN su node -c "npm install -g @anthropic-ai/claude-code"
 
 # Copy and set up firewall script
 COPY init-firewall.sh /usr/local/bin/
-USER root
-RUN chmod +x /usr/local/bin/init-firewall.sh && \
-  echo "node ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/node-firewall && \
-  chmod 0440 /etc/sudoers.d/node-firewall
-USER node
+# Copy Privoxy configuration
+COPY privoxy.conf /etc/privoxy/config
+COPY whitelist.txt /etc/privoxy/whitelist.txt
+# Copy s6 service definitions
+COPY s6-services/ /etc/s6-overlay/s6-rc.d/
+
+# Set permissions on scripts
+RUN chmod +x /usr/local/bin/init-firewall.sh \
+             /etc/s6-overlay/s6-rc.d/init-firewall/run \
+             /etc/s6-overlay/s6-rc.d/privoxy/run \
+             /etc/s6-overlay/s6-rc.d/user-shell/run
+
+# s6 as entrypoint
+ENTRYPOINT ["/init"]
+CMD ["/bin/zsh"]
