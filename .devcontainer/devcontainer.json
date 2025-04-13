@@ -40,9 +40,20 @@
   "remoteEnv": {
     "NODE_OPTIONS": "--max-old-space-size=4096",
     "CLAUDE_CONFIG_DIR": "/home/node/.claude",
-    "POWERLEVEL9K_DISABLE_GITSTATUS": "true"
+    "POWERLEVEL9K_DISABLE_GITSTATUS": "true",
+    "HTTP_PROXY": "http://localhost:31265",
+    "HTTPS_PROXY": "http://localhost:31265",
+    "http_proxy": "http://localhost:31265",
+    "https_proxy": "http://localhost:31265"
+  },
+  "containerEnv": {
+    "HTTP_PROXY": "http://localhost:31265",
+    "HTTPS_PROXY": "http://localhost:31265",
+    "http_proxy": "http://localhost:31265",
+    "https_proxy": "http://localhost:31265"
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
   "workspaceFolder": "/workspace",
-  "overrideCommand": false
+  "overrideCommand": false,
+  "remoteUser": "node"
 }

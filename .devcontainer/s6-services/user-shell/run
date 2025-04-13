@@ -1,4 +1,0 @@
-#!/command/execlineb -P
-# This script runs as the 'node' user (defined in the 'user' file).
-# Simply execute the default shell (zsh)
-/bin/zsh

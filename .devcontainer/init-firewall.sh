@@ -2,91 +2,158 @@
 set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
 IFS=$'\n\t'       # Stricter word splitting
 
-echo "Configuring firewall rules with custom CLAUDE_CODE chains..."
+# Disable command echo for cleaner logs
+set +x
+
+# Consistent naming and file locations
+FLAG_FILE="/var/run/firewall/configured"
+READY_FILE="/tmp/firewall-initialized"  # Changed to match Dockerfile expectation
+
+#READY_FILE="/var/run/firewall/ready"
+LOG_LEVEL="info"  # Options: debug, info, warning, error
+PROXY_PORT=31265
+CHAINS_PREFIX="CLAUDE"
+
+# Create firewall directory
+mkdir -p "$(dirname "$FLAG_FILE")"
+
+
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [FIREWALL] $1"
+}
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "This script must be run as root" >&2
+  log "ERROR: This script must be run as root" >&2
   exit 1
 fi
 
-# === Create CLAUDE_CODE chains (if they don't exist) ===
-# Create the custom chains in each table we'll use
-if ! iptables -L CLAUDE_CODE_FILTER >/dev/null 2>&1; then
-  echo "Creating CLAUDE_CODE_FILTER chain for filter table"
-  iptables -N CLAUDE_CODE_FILTER
-else
-  echo "CLAUDE_CODE_FILTER chain already exists"
-  iptables -F CLAUDE_CODE_FILTER
+if [ -f "$FLAG_FILE" ]; then
+  log "Firewall already configured, skipping..."
+  # Ensure ready file exists even on restart
+  touch "$READY_FILE"
+  # Keep the script running to prevent runit from restarting it
+  exec sleep infinity
 fi
 
-if ! iptables -t nat -L CLAUDE_CODE_NAT >/dev/null 2>&1; then
-  echo "Creating CLAUDE_CODE_NAT chain for nat table"
-  iptables -t nat -N CLAUDE_CODE_NAT
-else
-  echo "CLAUDE_CODE_NAT chain already exists"
-  iptables -t nat -F CLAUDE_CODE_NAT
-fi
+log "Configuring firewall rules with ${CHAINS_PREFIX} chains..."
 
-# === Set up chain references ===
-# Make sure all traffic goes through our chains first
-# For filter table (INPUT, OUTPUT)
-iptables -C INPUT -j CLAUDE_CODE_FILTER 2>/dev/null || iptables -I INPUT 1 -j CLAUDE_CODE_FILTER
-iptables -C OUTPUT -j CLAUDE_CODE_FILTER 2>/dev/null || iptables -I OUTPUT 1 -j CLAUDE_CODE_FILTER
+# Define chain names for clarity
+FILTER_CHAIN="${CHAINS_PREFIX}_FILTER"
+NAT_CHAIN="${CHAINS_PREFIX}_NAT"
+LOGGING_CHAIN="${CHAINS_PREFIX}_LOGGING"
 
-# For nat table (OUTPUT only)
-iptables -t nat -C OUTPUT -j CLAUDE_CODE_NAT 2>/dev/null || iptables -t nat -I OUTPUT 1 -j CLAUDE_CODE_NAT
+# === Clean up existing rules ===
+log "Cleaning up existing rules"
 
-# === Base Rules (filter table - using CLAUDE_CODE_FILTER) ===
+# Save default policies before reset
+DEFAULT_INPUT_POLICY=$(iptables -S INPUT | head -1 | cut -d' ' -f3)
+DEFAULT_OUTPUT_POLICY=$(iptables -S OUTPUT | head -1 | cut -d' ' -f3)
+
+# First remove references to our custom chains (if they exist)
+iptables -t nat -D OUTPUT -j "$NAT_CHAIN" 2>/dev/null || true
+iptables -D OUTPUT -j "$FILTER_CHAIN" 2>/dev/null || true
+iptables -D OUTPUT -j "$LOGGING_CHAIN" 2>/dev/null || true
+
+# Then flush the chains
+iptables -F "$FILTER_CHAIN" 2>/dev/null || true
+iptables -t nat -F "$NAT_CHAIN" 2>/dev/null || true
+iptables -F "$LOGGING_CHAIN" 2>/dev/null || true
+
+# Finally delete the chains
+iptables -X "$FILTER_CHAIN" 2>/dev/null || true
+iptables -t nat -X "$NAT_CHAIN" 2>/dev/null || true
+iptables -X "$LOGGING_CHAIN" 2>/dev/null || true
+
+# === Create custom chains ===
+log "Creating custom chains"
+iptables -t nat -N "$NAT_CHAIN"
+iptables -N "$FILTER_CHAIN"
+iptables -N "$LOGGING_CHAIN"
+
+# === Set up basic allow rules directly in INPUT/OUTPUT chains ===
+log "Setting up basic rules"
+
 # Allow loopback traffic
-iptables -A CLAUDE_CODE_FILTER -i lo -j ACCEPT
-iptables -A CLAUDE_CODE_FILTER -o lo -j ACCEPT
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
 
-# Allow outbound DNS
-iptables -A CLAUDE_CODE_FILTER -p udp --dport 53 -j ACCEPT
-
-# Allow inbound DNS responses
-iptables -A CLAUDE_CODE_FILTER -p udp --sport 53 -j ACCEPT
-
-# Allow SSH
-iptables -A CLAUDE_CODE_FILTER -p tcp --dport 22 -j ACCEPT
+# Allow SSH (both incoming and outgoing)
+iptables -A INPUT -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT
+iptables -A OUTPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT
 
 # Allow established/related connections
-iptables -A CLAUDE_CODE_FILTER -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# Allow root user traffic
-iptables -A CLAUDE_CODE_FILTER -p tcp -m owner --uid-owner root -j ACCEPT
+# === AWS specific rules ===
+# Allow access to AWS metadata service
+iptables -A OUTPUT -d 169.254.169.254/32 -j ACCEPT
+# Allow NTP for time sync (important for certificates)
+iptables -A OUTPUT -p udp --dport 123 -j ACCEPT
 
-# Allow Privoxy traffic using source port
-iptables -A CLAUDE_CODE_FILTER -p tcp --sport 31265 -j ACCEPT
 
-# Direct access rule for metadata server
-iptables -A CLAUDE_CODE_FILTER -d 169.254.169.254/32 -j ACCEPT
+# === Configure NAT chain for proxying ===
+log "Setting up NAT chain for proxying"
 
-# === NAT Redirection rules (in CLAUDE_CODE_NAT) ===
-# Exclude traffic destined for Privoxy itself
-iptables -t nat -A CLAUDE_CODE_NAT -p tcp -d 127.0.0.1 --dport 31265 -j RETURN
+# Exclude certain destinations from proxying
+iptables -t nat -A "$NAT_CHAIN" -p tcp -d 169.254.169.254/32 -j RETURN
+iptables -t nat -A "$NAT_CHAIN" -o lo -j RETURN
 
-# Exclude the metadata server from proxying
-iptables -t nat -A CLAUDE_CODE_NAT -p tcp -d 169.254.169.254/32 -j RETURN
+# Redirect HTTP/HTTPS to Squid proxy for non-root users
+iptables -t nat -A "$NAT_CHAIN" -p tcp --dport 80 -m owner ! --uid-owner root -j REDIRECT --to-port 31265
+iptables -t nat -A "$NAT_CHAIN" -p tcp --dport 443 -m owner ! --uid-owner root -j REDIRECT --to-port 31266
 
-# For HTTP traffic, redirect to Privoxy
-iptables -t nat -A CLAUDE_CODE_NAT -p tcp --dport 80 -j REDIRECT --to-port 31265
+# === Configure outbound access rules ===
+log "Setting up outbound access rules"
 
-# For HTTPS traffic, redirect to Privoxy
-iptables -t nat -A CLAUDE_CODE_NAT -p tcp --dport 443 -j REDIRECT --to-port 31265
+# Allow DNS queries
+iptables -A "$FILTER_CHAIN" -p udp --dport 53 -j ACCEPT
+iptables -A "$FILTER_CHAIN" -p tcp --dport 53 -j ACCEPT
 
-# === Default Policies (filter table) - commented out for review ===
-# These are left commented out to avoid locking yourself out
-# Uncomment only after thorough testing
-# iptables -P INPUT DROP
-# iptables -P FORWARD DROP
-# iptables -P OUTPUT DROP
+# Allow root to do anything
+iptables -A "$FILTER_CHAIN" -m owner --uid-owner root -j ACCEPT
 
-echo "CLAUDE_CODE firewall rules successfully applied"
+# Explicitly block non-root users from accessing HTTP/HTTPS ports directly
+iptables -A "$FILTER_CHAIN" -p tcp -m multiport --dports 80,443 -m owner ! --uid-owner root -j DROP
+log "Blocked direct HTTP/HTTPS access for non-root users"
 
-# Optional: Display current rules for verification
-echo "Current NAT rules:"
+# Rate limit connections to reduce potential abuse
+iptables -A "$FILTER_CHAIN" -p tcp --syn -m limit --limit 20/s --limit-burst 100 -j ACCEPT
+
+# === Add custom chains to main chains ===
+log "Adding custom chains to main chains"
+iptables -t nat -A OUTPUT -j "$NAT_CHAIN"
+iptables -A OUTPUT -j "$FILTER_CHAIN"
+iptables -A OUTPUT -j "$LOGGING_CHAIN"
+
+# Set default policies
+if [ "$DEFAULT_INPUT_POLICY" = "DROP" ]; then
+  iptables -P INPUT DROP
+else
+  log "Keeping existing INPUT policy: $DEFAULT_INPUT_POLICY"
+fi
+
+if [ "$DEFAULT_OUTPUT_POLICY" = "DROP" ]; then
+  iptables -P OUTPUT DROP
+else
+  # Enhance security by setting OUTPUT policy to DROP
+  log "Setting OUTPUT policy to DROP for improved security"
+  iptables -P OUTPUT DROP
+fi
+
+# === Show summary for verification ===
+log "Firewall configuration completed"
+log "Current NAT rules:"
 iptables -t nat -L -v
-echo "Current filter rules:"
+log "Current filter rules:"
 iptables -L -v
 
+# Create flag file to indicate successful configuration
+touch "$FLAG_FILE"
+
+# Signal to other services that firewall is ready
+log "Signaling firewall ready status"
+touch "$READY_FILE"
+
+# Keep the script running to prevent runit from restarting it
+exec sleep infinity
